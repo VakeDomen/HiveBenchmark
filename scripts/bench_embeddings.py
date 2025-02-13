@@ -117,11 +117,12 @@ def main():
 
 
     print("Embedding benchmark configuration:")
-    print(f"\t-> data:       {args.json_file}")
-    print(f"\t-> model:      {model}")
-    print(f"\t-> duration:   {duration} [s]")
-    print(f"\t-> #threads:   {num_threads}")
-    print(f"\t-> batch size: {batch_size}")
+    print(f"\t-> Host:       {endpoint}")
+    print(f"\t-> Data:       {args.json_file}")
+    print(f"\t-> Model:      {model}")
+    print(f"\t-> Duration:   {duration} [s]")
+    print(f"\t-> #Threads:   {num_threads}")
+    print(f"\t-> Batch Size: {batch_size}")
 
     # Set up logging.
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
