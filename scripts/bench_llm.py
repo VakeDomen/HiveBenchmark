@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
-import json
 import time
-import random
 import threading
 import logging
 import argparse
@@ -11,25 +9,25 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 from ollama import Client
 
+# Global counters, thread statuses, and a lock for thread-safe updates
 success_calls = 0
 success_time = 0.0
 
 failure_calls = 0
 faliure_time = 0.0
 
-total_embeddings = 0
 total_request_time = 0.0
 
 thread_status = {}   # maps thread_id -> "running" | "crashed" | "completed"
 lock = threading.Lock()
 
 
-def worker(thread_id, batch, endpoint, model, duration, start_time):
+def worker(thread_id, question, endpoint, model, duration, start_time):
     """
-    Worker thread that instantiates its own Ollama client and repeatedly makes embedding requests.
-    Checks the response code (or error field) and records success or failure.
+    Worker thread that instantiates its own Ollama client and repeatedly asks a question.
+    Checks the response (via status_code or error field) and records success or failure.
     """
-    global success_calls, failure_calls, faliure_time, success_time, total_request_time, total_embeddings, thread_status
+    global success_calls, failure_calls, faliure_time, success_time, total_request_time, thread_status
     with lock:
         thread_status[thread_id] = "running"
     client = Client(endpoint)
@@ -38,7 +36,7 @@ def worker(thread_id, batch, endpoint, model, duration, start_time):
             req_start = time.time()
             succ = True
             try:
-                response = client.embed(model=model, input=batch)
+                response = client.generate(model=model, prompt=question)
                 if (hasattr(response, "status_code") and response.status_code != 200) or \
                    (isinstance(response, dict) and "error" in response):
                     succ = False
@@ -50,7 +48,6 @@ def worker(thread_id, batch, endpoint, model, duration, start_time):
                 total_request_time += elapsed
                 if succ:
                     success_calls += 1
-                    total_embeddings += len(batch)
                     success_time += elapsed
                 else:
                     failure_calls += 1
@@ -68,11 +65,11 @@ def progress_logger(duration, start_time):
     pbar = tqdm(total=duration, desc="Benchmark Time", unit="sec")
     while time.time() - start_time < duration:
         with lock:
-            avg_time = total_request_time / (success_calls + failure_calls) if (success_calls + failure_calls) > 0 else 0
+            total_calls = success_calls + failure_calls
+            avg_time = total_request_time / total_calls if total_calls > 0 else 0
             pbar.set_postfix({
                 "success": success_calls,
                 "failures": failure_calls,
-                "embeddings": total_embeddings,
                 "avg_time": f"{avg_time:.4f}s"
             })
         elapsed = int(time.time() - start_time)
@@ -84,18 +81,16 @@ def progress_logger(duration, start_time):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark Hive (Ollama proxy) embedding calls."
+        description="Benchmark Hive (Ollama proxy) Q&A calls."
     )
-    parser.add_argument("json_file", nargs="?", default="../data/chunks.json",
-                        help="Path to JSON file containing an array of strings (chunks). Default: ../data/chunks.json")
-    parser.add_argument("--concurrent", "-c", type=int, default=100,
-                        help="Number of concurrent requests (default: 100)")
-    parser.add_argument("--batch", "-b", type=int, default=5,
-                        help="Batch size (number of embeddings per request, default: 5)")
+    parser.add_argument("--question", "-q", default="What is the meaning of life?",
+                        help="Question to ask the model (default: 'What is the meaning of life?')")
+    parser.add_argument("--concurrent", "-c", type=int, default=20,
+                        help="Number of concurrent requests (default: 20)")
     parser.add_argument("--host", "-H", default=None,
                         help="Ollama host endpoint (default: env OLLAMA_ENDPOINT or http://localhost:11434)")
-    parser.add_argument("--model", "-m", default="bge-m3",
-                        help="Model to use for embedding (default: bge-m3)")
+    parser.add_argument("--model", "-m", default="mistral-nemo",
+                        help="Model to use for Q&A (default: mistral-nemo)")
     parser.add_argument("--time", "-t", type=int, default=60,
                         help="Benchmark duration in seconds (default: 60)")
     args = parser.parse_args()
@@ -105,31 +100,18 @@ def main():
     model = args.model
     duration = args.time
     num_threads = args.concurrent
-    batch_size = args.batch
+    question = args.question
 
-
-    print("Embedding benchmark configuration:")
-    print(f"\t-> Host:       {endpoint}")
-    print(f"\t-> Data:       {args.json_file}")
-    print(f"\t-> Model:      {model}")
-    print(f"\t-> Duration:   {duration} [s]")
-    print(f"\t-> #Threads:   {num_threads}")
-    print(f"\t-> Batch Size: {batch_size}")
+    print("Q&A benchmark configuration:")
+    print(f"\t-> Host:     {endpoint}")
+    print(f"\t-> Model:    {model}")
+    print(f"\t-> Duration: {duration} [s]")
+    print(f"\t-> Threads:  {num_threads}")
+    print(f"\t-> Question: {question}")
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logging.getLogger("ollama").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-
-    try:
-        with open(args.json_file, 'r') as f:
-            data = json.load(f)
-    except Exception as e:
-        print(f"Error loading JSON file: {e}")
-        sys.exit(1)
-
-    if not isinstance(data, list):
-        print("JSON file must contain an array of strings.")
-        sys.exit(1)
 
     start_time = time.time()
     threads = {}
@@ -137,11 +119,7 @@ def main():
 
     for _ in range(num_threads):
         thread_counter += 1
-        if len(data) >= batch_size:
-            batch = random.sample(data, batch_size)
-        else:
-            batch = random.choices(data, k=batch_size)
-        t = threading.Thread(target=worker, args=(thread_counter, batch, endpoint, model, duration, start_time))
+        t = threading.Thread(target=worker, args=(thread_counter, question, endpoint, model, duration, start_time))
         t.start()
         threads[thread_counter] = t
 
@@ -155,11 +133,7 @@ def main():
                 if not threads[tid].is_alive() and thread_status.get(tid) == "crashed":
                     logging.warning(f"Thread {tid} crashed. Spawning a new thread.")
                     thread_counter += 1
-                    if len(data) >= batch_size:
-                        new_batch = random.sample(data, batch_size)
-                    else:
-                        new_batch = random.choices(data, k=batch_size)
-                    new_thread = threading.Thread(target=worker, args=(thread_counter, new_batch, endpoint, model, duration, start_time))
+                    new_thread = threading.Thread(target=worker, args=(thread_counter, question, endpoint, model, duration, start_time))
                     new_thread.start()
                     threads[thread_counter] = new_thread
                     del threads[tid]
@@ -168,19 +142,18 @@ def main():
         t.join()
     progress_thread.join()
 
-    avg_time = total_request_time / (success_calls + failure_calls) if (success_calls + failure_calls) > 0 else 0
+    total_calls = success_calls + failure_calls
+    avg_time = total_request_time / total_calls if total_calls > 0 else 0
     avg_succ_time = success_time / success_calls if success_calls > 0 else 0
     avg_fail_time = faliure_time / failure_calls if failure_calls > 0 else 0
     print("\nBenchmark Results:")
     print(f"👍 Successful calls: {success_calls}")
     print(f"👎 Crashes/Failures: {failure_calls}")
-    print(f"✅ Total embeddings made: {total_embeddings}")
     print("")
     print(f"🟡 Average request time: {avg_time:.4f} seconds")
     print(f"🟢 Average success time: {avg_succ_time:.4f} seconds")
     print(f"🔴 Average fail time: {avg_fail_time:.4f} seconds")
-    
-    
+
 
 if __name__ == "__main__":
     main()
